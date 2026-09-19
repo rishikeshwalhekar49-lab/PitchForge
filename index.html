@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PitchForge</title>
+<style>
+:root{--bg:#f7f7fb;--card:#fff;--ink:#16162a;--mute:#6b6b80;--line:#e3e3ee;--acc:#4f46e5;--bad:#c2410c;--good:#15803d}
+@media (prefers-color-scheme:dark){:root{--bg:#0f0f17;--card:#191926;--ink:#ececf5;--mute:#9a9ab0;--line:#2a2a3c;--acc:#8b85ff;--bad:#fb923c;--good:#4ade80}}
+*{box-sizing:border-box}body{margin:0;font:15px/1.5 system-ui,sans-serif;background:var(--bg);color:var(--ink)}
+header{padding:20px 16px;border-bottom:1px solid var(--line)}h1{margin:0;font-size:22px}header p{margin:4px 0 0;color:var(--mute)}
+main{max-width:1200px;margin:auto;padding:16px;display:grid;gap:16px;grid-template-columns:340px 1fr}
+@media(max-width:860px){main{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px}
+label{display:block;font-size:12px;color:var(--mute);margin:10px 0 4px}
+input,textarea{width:100%;padding:9px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit}
+button{background:var(--acc);color:#fff;border:0;border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer;margin-top:12px}
+button.ghost{background:transparent;color:var(--acc);border:1px solid var(--acc)}
+.slide{border-left:4px solid var(--acc)}.slide h3{margin:0;font-size:12px;letter-spacing:.08em;color:var(--acc);text-transform:uppercase}
+[contenteditable]{outline:none;border-radius:6px;padding:2px 4px}[contenteditable]:focus{background:var(--bg)}
+.headline{font-size:20px;font-weight:700;margin:6px 0}.refs{font-size:12px;color:var(--mute);margin-top:8px}
+.score{font-size:40px;font-weight:800}.pill{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;border:1px solid var(--line);margin:2px}
+.issue{color:var(--bad);font-size:13px}.ok{color:var(--good)}#slides{display:grid;gap:12px}small{color:var(--mute)}
+</style>
+</head>
+<body>
+<header><h1>PitchForge</h1><p>Idea → a 10-slide investor pitch built from reference decks, then checked the way a VC would check it.</p></header>
+<main>
+<aside style="display:grid;gap:16px;align-content:start">
+  <div class="card">
+    <strong>1 · Reference decks</strong>
+    <label>Upload pitch-deck PDFs (bulk)</label>
+    <input type="file" id="pdfs" multiple accept="application/pdf">
+    <button class="ghost" onclick="upload()">Index PDFs</button>
+    <div id="refstatus"><small>Loading corpus…</small></div>
+  </div>
+  <div class="card">
+    <strong>2 · Your idea</strong>
+    <label>Company name</label><input id="company" placeholder="Acme">
+    <label>Core business idea</label><textarea id="idea" rows="3" placeholder="AI bookkeeping that closes the books for freelancers in 5 minutes"></textarea>
+    <label>Target audience</label><input id="audience" placeholder="Freelancers and solo consultants">
+    <label>Industry</label><input id="industry" placeholder="fintech">
+    <button onclick="gen()">Generate pitch</button>
+  </div>
+  <div class="card" id="analysis" hidden></div>
+</aside>
+<section><div id="slides"></div></section>
+</main>
+<script>
+let deck=null;const $=id=>document.getElementById(id);
+const esc=s=>String(s??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+async function refs(){const r=await (await fetch('/api/references')).json();
+  $('refstatus').innerHTML=`<small>${r.documents.length} decks indexed</small><br>`+
+  (r.documents.length?`<small>Most common slide order: ${r.dna.recommended_order.join(' → ')}</small>`:'')}
+async function upload(){const f=$('pdfs').files;if(!f.length)return;const fd=new FormData();
+  for(const x of f)fd.append('files',x);$('refstatus').innerHTML='<small>Indexing…</small>';
+  const r=await (await fetch('/api/references',{method:'POST',body:fd})).json();
+  const c=s=>r.results.filter(x=>x.status===s).length;
+  await refs();$('refstatus').innerHTML+=`<br><small>${c('indexed')} new · ${c('duplicate')} duplicates · ${c('failed')} failed</small>`}
+async function gen(){const body={idea:$('idea').value,audience:$('audience').value,industry:$('industry').value,company:$('company').value||null};
+  $('slides').innerHTML='<div class="card">Generating…</div>';
+  const r=await fetch('/api/decks',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(!r.ok){$('slides').innerHTML='<div class="card issue">Please fill in all fields (the idea needs at least 10 characters).</div>';return}
+  deck=await r.json();render()}
+function render(){
+  $('slides').innerHTML=`<div class="card"><strong>${esc(deck.input.company||'Your pitch')}</strong> <small>· engine: ${deck.engine||'saved'} · click any text to edit</small>
+   <br><a href="/api/decks/${deck.id}/export.pptx"><button>Download .pptx</button></a> <a href="/api/decks/${deck.id}/export.md"><button class="ghost">Markdown</button></a></div>`+
+  deck.slides.map(s=>`<div class="card slide" data-k="${s.key}">
+   <h3>${s.n} · ${esc(s.title)} <span class="pill">${deck.analysis.readiness.per_slide[s.key].score}/100</span></h3>
+   <div class="headline" contenteditable onblur="save('${s.key}')">${esc(s.headline)}</div>
+   <ul contenteditable onblur="save('${s.key}')">${s.bullets.map(b=>`<li>${esc(b)}</li>`).join('')}</ul>
+   <small>${esc(s.guidance||'')}</small>
+   <div class="refs">${s.references.length?'Based on: '+s.references.map(r=>`${esc(r.file)} p${r.page}`).join(', '):'No reference decks matched this slide yet'}</div></div>`).join('');
+  const a=deck.analysis,iss=[...a.market_math.issues,...a.consistency];
+  $('analysis').hidden=false;$('analysis').innerHTML=`<strong>Investor check</strong>
+   <div class="score">${a.readiness.overall}<small>/100</small></div><small>Readiness, scored against the reference decks</small>
+   <p><strong>Consistency checks</strong><br>${iss.length?iss.map(i=>`<div class="issue">⚠ ${esc(i)}</div>`).join(''):'<span class="ok">✓ No contradictions found</span>'}</p>
+   <p><strong>Questions a VC will ask</strong>${(a.red_team.questions||[]).map(q=>`<div style="margin-top:6px"><span class="pill">${q.slide}</span> ${esc(q.question)}</div>`).join('')}</p>
+   <small>Biggest risk: ${esc(a.red_team.kill_risk)}</small>`}
+async function save(key){const el=document.querySelector(`[data-k="${key}"]`);
+  const body={headline:el.querySelector('.headline').innerText.trim(),bullets:[...el.querySelectorAll('li')].map(l=>l.innerText.trim()).filter(Boolean)};
+  const r=await fetch(`/api/decks/${deck.id}/slides/${key}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+  if(r.ok){deck=await r.json();render()}}
+refs();
+</script>
+</body>
+</html>
