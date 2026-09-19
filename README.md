@@ -1,63 +1,40 @@
-# PitchForge — Startup Pitch Builder
+# Evaluation suite (for the paper)
 
-Turn a raw business idea into a **fundable, fully editable 10-slide investor pitch** in minutes. Each slide is grounded in real reference pitch decks you upload, and the deck is checked the way a VC would check it.
-
-```
-idea + audience + industry ──► retrieve similar slides from indexed decks ──► draft (Gemini Flash / offline templates)
-                                                                               │
-          .pptx / .md export ◄── live edit + re-score ◄── investor checks (Gemini Pro red-team + rule engines)
-```
-
-## The 10-slide framework
-Problem · Solution · Market Size (TAM/SAM/SOM) · Business Model · Competitive Landscape · Go-To-Market · Team · Financial Projections · Traction · Funding Ask
-
-## Reference-deck pipeline (built for 10+ PDFs at a time)
-| Stage | What it does |
-|---|---|
-| **Dedupe** | SHA-256 of each file's bytes, checked *before* parsing, so re-uploads are free and ingest can be retried safely |
-| **Parallel parse** | `ProcessPoolExecutor` across CPU cores. One corrupt or encrypted PDF is reported as failed and never breaks the batch |
-| **Redact** | Emails, phone numbers and API-key-shaped secrets are removed before anything is stored |
-| **Classify** | Each page is labeled as one of the 10 slide types using keyword scores (titles weighted 3x) plus where the page sits in the deck |
-| **Store** | SQLite (WAL), one transaction per document |
-| **Index** | TF-IDF (1–2-grams) vector index, rebuilt lazily only when the corpus changes |
-| **Use** | Retrieves the top matching reference slides for each slide (with citations), per-slide word-count benchmarks, and the slide order decks most often use |
-
-Measured: 12 decks indexed in about 3.5 s on a laptop; re-ingesting the same 12 takes 0.00 s.
-
-## What's new here
-1. **Deck DNA**: learns the slide order the reference decks actually use (mean normalized position), per industry when at least 3 decks match.
-2. **Market Math Guard**: reads the $ values for TAM/SAM/SOM and flags impossible funnels (SAM > TAM) and unrealistic capture (SOM > 20% of SAM).
-3. **Cross-Slide Lie Detector**: checks that ask ÷ burn matches the stated runway, that use-of-funds adds up to 100%, and that pre-revenue traction doesn't sit next to $1M+ year-1 revenue.
-4. **Evidence Gap Map**: counts every `[ASSUMPTION]` placeholder per slide, which gives you your diligence to-do list.
-5. **Corpus-benchmarked Readiness Score**: scores specificity and length against the uploaded decks, not a fixed rubric. It re-scores live after every edit.
-6. **VC Red-Team**: a Pro-tier model asks the toughest questions about your 3 weakest slides and names the single biggest risk that could sink the round.
-7. **Citations on every slide**: shows which reference deck and page shaped each slide.
-
-## Run it
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env            # optional: add GEMINI_API_KEY
-python cli.py make-samples      # 12 synthetic reference decks (or use your own PDFs)
-python cli.py ingest sample_decks
-uvicorn app.main:app --reload   # open http://localhost:8000
+python -m eval.run_eval                     # E1–E4 on seeded synthetic data (~1 min) -> eval/results/
+GEMINI_API_KEY=... python -m eval.run_eval  # also runs the LLM baseline for E1
+python -m eval.real_eval template eval/real_decks   # then hand-label eval/labels.csv
+python -m eval.real_eval score eval/real_decks      # real-deck classification table
 ```
-CLI only: `python cli.py generate --idea "..." --audience "..." --industry fintech --out deck.pptx`
+Outputs: `results/results.md` (readable), `results/results.json` (raw), `results/tables.tex` (paste into LaTeX).
 
-Docker: `docker build -t pitchforge . && docker run -p 8080:8080 -v $PWD/data:/data pitchforge`
+## Experiments
+| ID | Question | Metric | Data |
+|---|---|---|---|
+| E1 | Does the rule-based checker catch planted numerical contradictions without false alarms? | P/R/F1 per type, false-alarm rate, ms/deck | 1,500 synthetic decks, 5 contradiction types + clean |
+| E1b | Is it better / cheaper than asking an LLM? | deck-level F1, s/deck | same generator, Gemini Flash |
+| E2 | Does the position signal help slide classification? | accuracy with 95% bootstrap CI, macro-F1 | synthetic sanity check; **real hand-labeled decks** via `real_eval.py` |
+| E3 | Can Deck DNA recover an industry's slide order, and how many decks does it need? | Kendall τ against the true order vs. #decks | synthetic industry "house styles" plus random swaps |
+| E4 | Does the ingest pipeline scale, and is it idempotent and privacy-preserving? | pages/s, speedup, re-ingest time, PII leaked | 10–100 generated PDFs (15 pages each) |
 
-## API
-| Method | Path | |
-|---|---|---|
-| POST | `/api/references` | multipart upload of many PDFs → per-file report |
-| GET | `/api/references` | indexed decks + Deck DNA |
-| GET | `/api/search?q=&slide_type=` | semantic search over reference slides |
-| POST | `/api/decks` | `{idea, audience, industry, company?}` → deck + analysis |
-| PATCH | `/api/decks/{id}/slides/{key}` | edit a slide → re-analyzed deck |
-| GET | `/api/decks/{id}/export.pptx` / `.md` | editable exports (with speaker notes) |
+## Findings so far (8-CPU laptop)
+- **E1:** macro-F1 1.000, 0% false alarms on clean decks, 0.03 ms per deck. *The first version had 51% false alarms*: the pre-revenue check flagged big year-3 targets. Restricting it to year-1 revenue fixed it. Report this before/after in the paper, since it's an honest error analysis.
+- **E3:** Deck DNA reaches τ≈0.97 with only 3 decks per industry and 1.0 by 20. The fixed canonical template scores 0.73.
+- **E4:** the first version was *slower* in parallel (0.04× the single-worker speed) because it started a fresh process pool on every call. A persistent pool plus running small batches (<8 docs) in one process gives a 4.8–5.4× speedup and about 5,400 pages/s. Re-ingesting takes about 1 ms per 100 decks. 0 emails leaked.
+- **E2 (synthetic):** every method scores 98–100%, so the synthetic data is too easy to separate them. **Use the real-deck results in the paper**, not these.
 
-## Tests
-`pytest -q` covers bulk ingest, idempotency, bad files, generation, edit + re-score, pptx export, and the consistency checks.
+## Threats to validity (state these in the paper, because reviewers will raise them)
+1. **E1 is circular on synthetic data:** the same authors wrote both the generator and the checker, so 100% shows *correctness*, not *generality*. Mitigations: (a) the LLM baseline on the same data; (b) hand-annotate contradictions in 30–50 real or student decks and report on those.
+2. **E2 synthetic results are saturated**, so you need real, hand-labeled decks. Aim for 25+ decks (about 300+ pages), with a second annotator on a subset to report Cohen's κ.
+3. E3 uses simulated orders. Validate on the real corpus by comparing the learned order with published advice (Sequoia, YC, Guy Kawasaki).
+4. Throughput depends on hardware and the PDF generator. Report the CPU, and note that scanned PDFs (which need OCR) aren't covered.
 
-## Roadmap
-OCR for scanned decks (Document AI / Tesseract) · Gemini / Vertex embeddings behind the same `Store.search` interface · BigQuery vector search for multi-tenant scale · slide design extraction from images.
+## Suggested paper outline
+**Title:** *Grounded and Verified: Retrieval-Augmented Pitch Deck Generation with Cross-Slide Numerical Consistency Checking*
+1. Introduction: LLM pitch tools produce fluent but unverified numbers.
+2. Related work: retrieval-augmented generation (RAG), hallucination detection, numerical reasoning in documents, slide/document layout classification.
+3. System: ingest pipeline → slide classifier → retrieval → drafter/critic → verifiers (figure: the diagram in the top-level README).
+4. Method: consistency rules (formalize each as a constraint, e.g. |ask/burn − runway| / runway > 0.35), the position-weighted classifier, Deck DNA (mean normalized position).
+5. Experiments: E1–E4 plus the real-deck E2.
+6. Error analysis: the pre-revenue false-alarm fix and the process-pool fix.
+7. Limitations and future work: OCR, learned (rather than hand-written) consistency constraints, a user study with founders and investors.
